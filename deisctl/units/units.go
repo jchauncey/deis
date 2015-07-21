@@ -9,6 +9,7 @@ var Names = []string{
 	"deis-logspout",
 	"deis-publisher",
 	"deis-registry",
+	"deis-riemann",
 	"deis-router",
 	"deis-store-admin",
 	"deis-store-daemon",

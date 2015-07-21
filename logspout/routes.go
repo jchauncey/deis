@@ -91,6 +91,34 @@ func (rm *RouteManager) Add(route *Route) error {
 	return nil
 }
 
+func (rm *RouteManager) AddRiemann(route *Route) error {
+	rm.Lock()
+	defer rm.Unlock()
+	if route.ID == "" {
+		h := sha1.New()
+		io.WriteString(h, strconv.Itoa(int(time.Now().UnixNano())))
+		route.ID = fmt.Sprintf("%x", h.Sum(nil))[:12]
+	}
+	route.closer = make(chan bool)
+	rm.routes[route.ID] = route
+	types := []string{}
+	if route.Source != nil {
+		types = append(types, route.Source.Types...)
+	}
+	go func() {
+		logstream := make(chan *Log)
+		defer close(logstream)
+		go riemannStreamer(route.Target, logstream)
+		rm.attacher.Listen(route.Source, logstream, route.closer)
+	}()
+	if rm.persistor != nil {
+		if err := rm.persistor.Add(route); err != nil {
+			log.Println("persistor:", err)
+		}
+	}
+	return nil
+}
+
 func (rm *RouteManager) Remove(id string) bool {
 	rm.Lock()
 	defer rm.Unlock()

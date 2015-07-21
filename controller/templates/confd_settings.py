@@ -32,6 +32,10 @@ REGISTRY_URL = '{{ getv "/deis/registry/protocol" }}://{{ getv "/deis/registry/h
 REGISTRY_HOST = '{{ getv "/deis/registry/host" }}'
 REGISTRY_PORT = '{{ getv "/deis/registry/port" }}'
 
+# riemann host
+RIEMANN_HOST = '{{ getv "/deis/riemann/host" }}'
+RIEMANN_PORT = '{{ getv "/deis/riemann/port" }}'
+
 # default to sqlite3, but allow postgresql config through envvars
 DATABASES = {
     'default': {

@@ -18,6 +18,9 @@ import (
 	"github.com/fsouza/go-dockerclient"
 	"github.com/go-martini/martini"
 	"golang.org/x/net/websocket"
+
+	// riemann deps
+	"github.com/bigdatadev/goryman"
 )
 
 var debugMode bool
@@ -94,7 +97,23 @@ func syslogStreamer(target Target, types []string, logstream chan *Log) {
 	}
 }
 
-// getLogParts returns a custom tag and PID for containers that
+func riemannStreamer(target Target, logstream chan *Log) {
+	riemannConnection := goryman.NewGorymanClient(target.Addr)
+	err := riemannConnection.Connect()
+	assert(err, "riemann")
+	for logline := range logstream {
+		tag, _ := getLogName(logline.Name)
+		err = riemannConnection.SendEvent(&goryman.Event{
+			Host: os.Getenv("ETCD_HOST"),
+			Service: tag,
+			Description: logline.Data,
+			Tags: []string{"log_type:" + logline.Type, "container_id:" + logline.ID},
+		})
+		assert(err, "riemann")
+	}
+}
+
+// getLogName returns a custom tag and PID for containers that
 // match Deis' specific application name format. Otherwise,
 // it returns the original name and 1 as the PID.  Additionally,
 // it returns log data.  The function is also smart enough to
@@ -255,7 +274,6 @@ func main() {
 
 		logstream := make(chan *Log)
 		defer close(logstream)
-
 		var closer <-chan bool
 		if req.Header.Get("Upgrade") == "websocket" {
 			closerBi := make(chan bool)

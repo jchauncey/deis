@@ -140,6 +140,10 @@ func startDefaultServices(b backend.Backend, stateless bool, wg *sync.WaitGroup,
 		wg.Wait()
 	}
 
+	fmt.Fprintln(out, "Metrics and Alerting subsystem...")
+	b.Start([]string{"riemann"}, wg, out, err)
+	wg.Wait()
+
 	// start logging subsystem first to collect logs from other components
 	fmt.Fprintln(out, "Logging subsystem...")
 	if !stateless {
@@ -233,6 +237,8 @@ func stopDefaultServices(b backend.Backend, stateless bool, wg *sync.WaitGroup, 
 	} else {
 		b.Stop([]string{"logger", "logspout"}, wg, out, err)
 	}
+	fmt.Fprintln(out, "Metrics and Alerting subsystem...")
+	b.Stop([]string{"riemann"}, wg, out, err)
 	wg.Wait()
 
 	if !stateless {
@@ -317,6 +323,10 @@ func installDefaultServices(b backend.Backend, stateless bool, wg *sync.WaitGrou
 		b.Create([]string{"store-daemon", "store-monitor", "store-metadata", "store-volume", "store-gateway@1"}, wg, out, err)
 		wg.Wait()
 	}
+
+	fmt.Fprintln(out, "Metrics and Alerting subsystem...")
+	b.Create([]string{"riemann"}, wg, out, err)
+	wg.Wait()
 
 	fmt.Fprintln(out, "Logging subsystem...")
 	if stateless {
@@ -403,6 +413,10 @@ func uninstallAllServices(b backend.Backend, stateless bool, wg *sync.WaitGroup,
 	} else {
 		b.Destroy([]string{"logger", "logspout"}, wg, out, err)
 	}
+	wg.Wait()
+
+	fmt.Fprintln(out, "Metrics and Alerting subsystem...")
+	b.Destroy([]string{"riemann"}, wg, out, err)
 	wg.Wait()
 
 	if !stateless {

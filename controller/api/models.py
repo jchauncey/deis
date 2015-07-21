@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import time
+import bernhard
 from threading import Thread
 
 from django.conf import settings
@@ -38,6 +39,12 @@ from utils import dict_diff, fingerprint
 
 logger = logging.getLogger(__name__)
 
+def send_event(state, description):
+    client = bernhard.Client(settings.RIEMANN_HOST)
+    client.send({'host': os.environ.get('HOST'),
+                 'service': "deis-controller",
+                 'description': description,
+                 'state': state})
 
 def close_db_connections(func, *args, **kwargs):
     """
@@ -227,13 +234,19 @@ class App(UuidAuditedModel):
 
     def create(self, *args, **kwargs):
         """Create a new application with an initial config and release"""
+        description = "Create Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('app_create_event', description)
         config = Config.objects.create(owner=self.owner, app=self)
         Release.objects.create(version=1, owner=self.owner, app=self, config=config, build=None)
+        log_event(self, 'owner:{}'.format(self.owner))
+        log_event(self, 'config:{}'.format(config))
 
     def delete(self, *args, **kwargs):
         """Delete this application including all containers"""
         try:
             # attempt to remove containers from the scheduler
+            description = "Delete Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+            send_event('app_delete_event', description)
             self._destroy_containers([c for c in self.container_set.exclude(type='run')])
         except RuntimeError:
             pass
@@ -246,6 +259,8 @@ class App(UuidAuditedModel):
             to_restart = to_restart.filter(type=kwargs.get('type'))
         if kwargs.get('num'):
             to_restart = to_restart.filter(num=kwargs.get('num'))
+        description = "Restart Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('app_restart_event', description)
         self._restart_containers(to_restart)
         return to_restart
 
@@ -253,10 +268,14 @@ class App(UuidAuditedModel):
         """Delete application logs stored by the logger component"""
         path = os.path.join(settings.DEIS_LOG_DIR, self.id + '.log')
         if os.path.exists(path):
-            os.remove(path)
+            os.remove(path) 
+        description = "Clean Logs Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('app_clean_logs_event', description)
 
     def scale(self, user, structure):  # noqa
         """Scale containers up or down to match requested structure."""
+        description = "Start Scale Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('start_app_scale_event', description)
         if self.release_set.latest().build is None:
             raise EnvironmentError('No build associated with this release')
         requested_structure = structure.copy()
@@ -267,11 +286,13 @@ class App(UuidAuditedModel):
             if container_type == 'cmd':
                 continue  # allow docker cmd types in case we don't have the image source
             if container_type not in available_process_types:
-                raise EnvironmentError(
-                    'Container type {} does not exist in application'.format(container_type))
-        msg = '{} scaled containers '.format(user.username) + ' '.join(
-            "{}={}".format(k, v) for k, v in requested_structure.items())
+                raise EnvironmentError('Container type {} does not exist in application'.format(container_type))
+        msg = '{} scaled containers '.format(user.username) + ' '.join("{}={}".format(k, v) for k, v in requested_structure.items())
         log_event(self, msg)
+        description = "End Scale Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('end_app_scale_event', description)
+        
+        
         # iterate and scale by container type (web, worker, etc)
         changed = False
         to_add, to_remove = [], []
@@ -448,8 +469,11 @@ class App(UuidAuditedModel):
             log_event(self, err, logging.ERROR)
             raise RuntimeError(err)
 
+
     def deploy(self, user, release):
         """Deploy a new release to this application"""
+        description = "Start Deploy Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('start_deploy_app_event', description)
         existing = self.container_set.exclude(type='run')
         new = []
         scale_types = set()
@@ -463,7 +487,11 @@ class App(UuidAuditedModel):
             self._deploy_app(scale_types, release, existing)
         else:
             self._start_containers(new)
-
+            tags = ['app_event', 
+                'app_deploy_event', 
+                'owner:{}'.format(self.owner),
+                'app_id:{}'.format(self.id)]
+            send_event('Deploy Application Event',tags, 'ok')
             # destroy old containers
             if existing:
                 self._destroy_containers(existing)
@@ -471,6 +499,8 @@ class App(UuidAuditedModel):
         # perform default scaling if necessary
         if self.structure == {} and release.build is not None:
             self._default_scale(user, release)
+        description = "End Deploy Application Event: owner:{} -- app_id:{}".format(self.owner, self.id)
+        send_event('end_deploy_app_event', description)
 
     def _deploy_app(self, scale_types, release, existing):
         for scale_type in scale_types:
@@ -712,6 +742,11 @@ class Push(UuidAuditedModel):
     def __str__(self):
         return "{0}-{1}".format(self.app.id, self.sha[:7])
 
+    def save(self, *args, **kwargs):
+        description = "Push Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('push_event', description)
+        super(Push, self).save(*args, **kwargs)
+
 
 @python_2_unicode_compatible
 class Build(UuidAuditedModel):
@@ -743,6 +778,8 @@ class Build(UuidAuditedModel):
                                          config=latest_release.config,
                                          source_version=source_version)
         try:
+            description = "Create Build Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+            send_event('build_create_event', description)
             self.app.deploy(user, new_release)
             return new_release
         except RuntimeError:
@@ -751,6 +788,8 @@ class Build(UuidAuditedModel):
 
     def save(self, **kwargs):
         try:
+            description = "Save Build Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+            send_event('build_save_event', description)
             previous_build = self.app.build_set.latest()
             to_destroy = []
             for proctype in previous_build.procfile:
@@ -790,7 +829,9 @@ class Config(UuidAuditedModel):
 
     def save(self, **kwargs):
         """merge the old config with the new"""
-        try:
+        try: 
+            description = "Save Config Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+            send_event('config_save_event', description)
             previous_config = self.app.config_set.latest()
             for attr in ['cpu', 'memory', 'tags', 'values']:
                 # Guard against migrations from older apps without fixes to
@@ -847,6 +888,8 @@ class Release(UuidAuditedModel):
 
         Releases start at v1 and auto-increment.
         """
+        description = "New Release Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('release_new_event', description)
         # construct fully-qualified target image
         new_version = self.version + 1
         # create new release and auto-increment version
@@ -885,6 +928,8 @@ class Release(UuidAuditedModel):
             if ':' in self.build.image:
                 if '/' not in self.build.image[self.build.image.rfind(':') + 1:]:
                     source_image += self.build.image[self.build.image.rfind(':'):]
+        description = "Publish Release Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('release_publish_event', description)               
         publish_release(source_image,
                         self.config.values,
                         self.image)
@@ -895,6 +940,8 @@ class Release(UuidAuditedModel):
 
         :return: the previous :class:`Release`, or None
         """
+        description = "Previous Release Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('release_previous_event', description)
         releases = self.app.release_set
         if self.pk:
             releases = releases.exclude(pk=self.pk)
@@ -909,6 +956,8 @@ class Release(UuidAuditedModel):
         if version < 1:
             raise EnvironmentError('version cannot be below 0')
         summary = "{} rolled back to v{}".format(user, version)
+        description = "Rollback Release Event: owner:{} -- app_id:{}. {}".format(self.owner, self.app.id, summary)
+        send_event('release_rollback_event', description)
         prev = self.app.release_set.get(version=version)
         new_release = self.new(
             user,
@@ -924,6 +973,8 @@ class Release(UuidAuditedModel):
             raise
 
     def save(self, *args, **kwargs):  # noqa
+        description = "Save Release Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('release_save_event', description)
         if not self.summary:
             self.summary = ''
             prev_release = self.previous()
@@ -1001,6 +1052,11 @@ class Domain(AuditedModel):
     def __str__(self):
         return self.domain
 
+    def save(self, *args, **kwargs):
+        description = "Save Domain Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('save_domain_event', description)
+        super(Domain, self).save(*args, **kwargs)
+
 
 @python_2_unicode_compatible
 class Certificate(AuditedModel):
@@ -1025,6 +1081,8 @@ class Certificate(AuditedModel):
             raise SuspiciousOperation(e)
 
     def save(self, *args, **kwargs):
+        description = "Save Certificate Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('certificate_save_event', description)
         certificate = self._get_certificate()
         if not self.common_name:
             self.common_name = certificate.get_subject().CN
@@ -1032,6 +1090,11 @@ class Certificate(AuditedModel):
             # convert openssl's expiry date format to Django's DateTimeField format
             self.expires = datetime.strptime(certificate.get_notAfter(), '%Y%m%d%H%M%SZ')
         return super(Certificate, self).save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        description = "Delete Certificate Event: owner:{} -- app_id:{}".format(self.owner, self.app.id)
+        send_event('certificate_delete_event', description)
+        return super(Certificate, self).delete(*args, **kwargs) 
 
 
 @python_2_unicode_compatible
@@ -1051,8 +1114,15 @@ class Key(UuidAuditedModel):
         return "{}...{}".format(self.public[:18], self.public[-31:])
 
     def save(self, *args, **kwargs):
+        description = "Save Key Event: owner:{}".format(self.owner)
+        send_event('key_save_event', description)
         self.fingerprint = fingerprint(self.public)
         return super(Key, self).save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        description = "Delete Key Event: owner:{}".format(self.owner)
+        send_event('key_delete_event', description)
+        return super(Key, self).delete(*args, **kwargs)
 
 
 # define update/delete callbacks for synchronizing
@@ -1117,7 +1187,6 @@ def _etcd_purge_key(**kwargs):
             key.owner.username, fingerprint(key.public)))
     except KeyError:
         pass
-
 
 def _etcd_purge_user(**kwargs):
     username = kwargs['instance'].username
@@ -1209,8 +1278,7 @@ post_save.connect(_log_config_updated, sender=Config, dispatch_uid='api.models.l
 post_save.connect(_log_domain_added, sender=Domain, dispatch_uid='api.models.log')
 post_save.connect(_log_cert_added, sender=Certificate, dispatch_uid='api.models.log')
 post_delete.connect(_log_domain_removed, sender=Domain, dispatch_uid='api.models.log')
-post_delete.connect(_log_cert_removed, sender=Certificate, dispatch_uid='api.models.log')
-
+post_delete.connect(_log_cert_removed, sender=Certificate, dispatch_uid='api.models.log')   
 
 # automatically generate a new token on creation
 @receiver(post_save, sender=get_user_model())
